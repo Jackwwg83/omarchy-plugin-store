@@ -694,6 +694,12 @@ cmd_thumb() {
     out="$THUMB_DIR/$id.webp"
   fi
   [[ -n $rel ]] || fail "plugin '$id' has no preview image"
+  # The catalog is remote data: only accept a plain relative asset path so a
+  # tampered entry cannot redirect the download to another host or walk up
+  # the asset tree.
+  if [[ $rel == /* || $rel == *..* || $rel == *://* || $rel == *$'\n'* ]]; then
+    fail "refusing unsafe preview path for '$id': $rel"
+  fi
 
   mkdir -p "$THUMB_DIR"
   if [[ ! -s $out ]]; then
