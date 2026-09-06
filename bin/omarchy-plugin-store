@@ -1,0 +1,1239 @@
+#!/bin/bash
+
+# omarchy:summary=Browse and manage marketplace shell plugins
+# omarchy:group=plugin
+# omarchy:args=<command> [options]
+# omarchy:examples=omarchy-plugin-store search clock --kind bar --limit 5
+
+set -euo pipefail
+
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_ID="jackom.plugin-store"
+
+CATALOG_URL="${OMARCHY_PLUGIN_STORE_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
+ASSET_BASE="${OMARCHY_PLUGIN_STORE_ASSET_BASE:-https://plugins.omarchy.org/}"
+TTL="${OMARCHY_PLUGIN_STORE_TTL:-43200}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-plugin-store"
+PLUGINS_DIR="${OMARCHY_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}"
+
+CATALOG_FILE="$CACHE_DIR/catalog.json"
+INDEX_FILE="$CACHE_DIR/index.json"
+THUMB_DIR="$CACHE_DIR/thumbs"
+
+fail() {
+  echo "omarchy-plugin-store: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "omarchy-plugin-store: $*" >&2
+}
+
+interactive() {
+  [[ -t 0 && -t 1 ]]
+}
+
+confirm() {
+  local prompt="$1"
+  ((ASSUME_YES)) && return 0
+  if interactive && command -v gum >/dev/null 2>&1; then
+    gum confirm "$prompt"
+  else
+    fail "refusing to continue without confirmation; pass --yes"
+  fi
+}
+
+valid_plugin_id() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *..* ]]
+}
+
+# ---------------------------------------------------------------- colors ----
+
+if [[ -n ${NO_COLOR:-} ]]; then
+  C_RESET="" C_BOLD="" C_DIM="" C_GREEN="" C_YELLOW="" C_BLUE="" C_RED=""
+else
+  C_RESET=$'\033[0m' C_BOLD=$'\033[1m' C_DIM=$'\033[2m'
+  C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m' C_BLUE=$'\033[34m' C_RED=$'\033[31m'
+fi
+
+# ----------------------------------------------------------------- cache ----
+
+file_mtime() {
+  stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+human_age() {
+  local s="$1"
+  if ((s < 60)); then
+    echo "${s}s"
+  elif ((s < 3600)); then
+    echo "$((s / 60))m"
+  elif ((s < 86400)); then
+    echo "$((s / 3600))h"
+  else
+    echo "$((s / 86400))d"
+  fi
+}
+
+slim_program() {
+  cat <<'JQ'
+{
+  generatedAt: (.generatedAt // ""),
+  plugins: [
+    .plugins[]?
+    | select(((.id // "") | tostring) != "")
+    | {
+        id: (.id // "" | tostring),
+        name: (.name // "" | tostring),
+        description: (.description // "" | tostring),
+        author: (.author // "" | tostring),
+        version: (.version // "" | tostring),
+        license: (.license // "" | tostring),
+        category: (.category // "" | tostring),
+        kind: (.kind // "" | tostring),
+        tags: ((.tags // []) | map(tostring)),
+        stars: (.stars // 0),
+        status: (.status // "" | tostring),
+        verificationStatus: (.verificationStatus // "" | tostring),
+        installAvailable: (if (.installAvailable // false) == true then true else false end),
+        installCommand: (.installCommand // "" | tostring),
+        installNote: (.installNote // "" | tostring),
+        repo: (.repo // "" | tostring),
+        repositoryUpdatedAt: (.repositoryUpdatedAt // "" | tostring),
+        addedAt: (.addedAt // "" | tostring),
+        previewThumbnail: (.previewThumbnail // "" | tostring),
+        previewImage: (.previewImage // "" | tostring),
+        listingValidatedCommit: (.listingValidatedCommit // "" | tostring),
+        upstreamValidatedCommit: (.upstreamValidatedCommit // "" | tostring)
+      }
+  ] | sort_by(.id)
+}
+JQ
+}
+
+build_index() {
+  local tmp
+  tmp="$(mktemp "$CACHE_DIR/.index.XXXXXX")"
+  if jq -S -f <(slim_program) "$CATALOG_FILE" >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$INDEX_FILE"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+download_catalog() {
+  local tmp
+  tmp="$(mktemp "$CACHE_DIR/.catalog.XXXXXX")"
+  if ! curl -fsSL --max-time 120 -o "$tmp" "$CATALOG_URL" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! jq -e '.plugins | type == "array"' "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$CATALOG_FILE"
+  return 0
+}
+
+# ensure_cache [force]
+ensure_cache() {
+  local force="${1:-0}"
+  mkdir -p "$CACHE_DIR" "$THUMB_DIR"
+
+  local need=0 age=0 now
+  now="$(date +%s)"
+  if [[ ! -s $CATALOG_FILE ]]; then
+    need=1
+  else
+    age=$((now - $(file_mtime "$CATALOG_FILE")))
+    ((age < 0)) && age=0
+    if ((force)) || ((age > TTL)); then
+      need=1
+    fi
+  fi
+
+  if ((need)); then
+    if download_catalog; then
+      build_index || fail "downloaded catalog could not be indexed"
+    else
+      if [[ -s $CATALOG_FILE ]]; then
+        warn "could not refresh catalog from $CATALOG_URL; using cached copy"
+      else
+        fail "could not download catalog from $CATALOG_URL"
+      fi
+    fi
+  fi
+
+  if [[ ! -s $INDEX_FILE || $INDEX_FILE -ot $CATALOG_FILE ]]; then
+    build_index || fail "cached catalog is not usable; try: omarchy-plugin-store catalog --refresh"
+  fi
+}
+
+# ------------------------------------------------------------ local state ----
+
+LOCAL_JSON=""
+local_json() {
+  if [[ -z $LOCAL_JSON ]]; then
+    local raw=""
+    if command -v omarchy-plugin-list >/dev/null 2>&1; then
+      raw="$(omarchy-plugin-list --json 2>/dev/null || true)"
+    fi
+    [[ -n $raw ]] || raw="[]"
+    LOCAL_JSON="$(printf '%s' "$raw" | jq -c '
+      [ .[]?
+        | select(((.firstParty // false) == true) | not)
+        | { id: (.id // "" | tostring),
+            name: (.name // "" | tostring),
+            kinds: ((.kinds // []) | map(tostring)),
+            enabled: (if (.enabled // false) == true then true else false end) }
+        | select(.id != "") ]
+    ' 2>/dev/null || echo '[]')"
+    [[ -n $LOCAL_JSON ]] || LOCAL_JSON="[]"
+  fi
+  printf '%s' "$LOCAL_JSON"
+}
+
+local_map() {
+  local_json | jq -c 'map({key: .id, value: .}) | from_entries'
+}
+
+is_installed() {
+  local_json | jq -e --arg id "$1" 'any(.[]; .id == $id)' >/dev/null 2>&1
+}
+
+is_enabled() {
+  local_json | jq -e --arg id "$1" 'any(.[]; .id == $id and .enabled)' >/dev/null 2>&1
+}
+
+git_head() {
+  git -C "$1" rev-parse HEAD 2>/dev/null || true
+}
+
+git_branch() {
+  local b
+  b="$(git -C "$1" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  if [[ -n $b ]]; then
+    printf '%s' "$b"
+  elif git -C "$1" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'detached'
+  fi
+}
+
+catalog_entry() {
+  jq -c --arg id "$1" 'first(.plugins[] | select(.id == $id)) // empty' "$INDEX_FILE" 2>/dev/null || true
+}
+
+# Merged catalog + local record for one id. Prints "" when nothing is known.
+merged_entry() {
+  local id="$1"
+  local entry dir="" head="" branch="" installed=false enabled=false listed=true
+  entry="$(catalog_entry "$id")"
+  if [[ -z $entry ]]; then
+    listed=false
+    entry="$(jq -cn --arg id "$id" '{
+      id: $id, name: "", description: "", author: "", version: "", license: "",
+      category: "", kind: "", tags: [], stars: 0, status: "",
+      verificationStatus: "", installAvailable: false, installCommand: "",
+      installNote: "", repo: "", repositoryUpdatedAt: "", addedAt: "",
+      previewThumbnail: "", previewImage: "", listingValidatedCommit: "",
+      upstreamValidatedCommit: ""
+    }')"
+  fi
+
+  if is_installed "$id"; then
+    installed=true
+    is_enabled "$id" && enabled=true
+  fi
+
+  # The on-disk checkout is inspected whenever it exists, but "installed" is
+  # decided by omarchy-plugin-list alone (see SPEC 4.2).
+  if [[ -d "$PLUGINS_DIR/$id" ]]; then
+    dir="$PLUGINS_DIR/$id"
+    head="$(git_head "$dir")"
+    branch="$(git_branch "$dir")"
+  fi
+
+  # Prefer a local name when the marketplace has none.
+  local lname
+  lname="$(local_json | jq -r --arg id "$id" 'first(.[] | select(.id == $id) | .name) // ""')"
+
+  printf '%s' "$entry" | jq -c \
+    --argjson listed "$listed" \
+    --argjson installed "$installed" \
+    --argjson enabled "$enabled" \
+    --arg dir "$dir" \
+    --arg head "$head" \
+    --arg branch "$branch" \
+    --arg lname "$lname" '
+    . as $e
+    | ($e.upstreamValidatedCommit // "") as $uv
+    | ($e.listingValidatedCommit // "") as $lv
+    | (if $uv != "" then $uv elif $lv != "" then $lv else "" end) as $validated
+    | $e
+      + { name: (if ($e.name // "") != "" then $e.name else $lname end) }
+      + { listed: $listed, installed: $installed, enabled: $enabled,
+          localDir: $dir, localHead: $head,
+          localBranch: $branch,
+          validatedCommit: $validated,
+          pinned: ($head != "" and $validated != "" and $head == $validated) }
+  '
+}
+
+# ------------------------------------------------------------- subcommands ---
+
+usage() {
+  cat <<'USAGE'
+omarchy-plugin-store — browse and manage Omarchy marketplace shell plugins
+
+Usage: omarchy-plugin-store <command> [options]
+
+Read-only commands
+  catalog [--refresh] [--quiet]        refresh/inspect the cached marketplace catalog
+  search [query] [filters]             search the catalog (default output: TSV)
+  show <id> [--json]                   detail card for one plugin
+  thumb <id> [--detail]                print path to the cached preview image
+  installed [--json]                   list installed third-party plugins
+  tui [query]                          interactive fzf browser
+
+Mutating commands
+  install <id> [--section S] [--pin] [--no-enable] [--yes]
+  enable <id> [--section S]
+  disable <id>
+  remove <id> [--yes]
+  update [id] [--yes]
+  pin <id>                             check out the marketplace-validated commit
+  unpin <id>                           return to the remote default branch
+
+  -h, --help                           this help ("<command> --help" for details)
+
+Environment
+  OMARCHY_PLUGIN_STORE_CATALOG_URL  default https://plugins.omarchy.org/catalog.json
+  OMARCHY_PLUGIN_STORE_ASSET_BASE   default https://plugins.omarchy.org/
+  OMARCHY_PLUGIN_STORE_TTL          cache lifetime in seconds (default 43200)
+  XDG_CACHE_HOME                    cache root (default ~/.cache)
+  OMARCHY_PLUGINS_DIR               default ~/.config/omarchy/plugins
+USAGE
+}
+
+cmd_catalog() {
+  local refresh=0 quiet=0
+  while (($# > 0)); do
+    case "$1" in
+    --refresh) refresh=1; shift ;;
+    --quiet | -q) quiet=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store catalog [--refresh] [--quiet]"
+      return 0
+      ;;
+    *) fail "unknown catalog option: $1" ;;
+    esac
+  done
+
+  ensure_cache "$refresh"
+  ((quiet)) && return 0
+
+  local count generated age now
+  count="$(jq -r '.plugins | length' "$INDEX_FILE")"
+  generated="$(jq -r '.generatedAt // ""' "$INDEX_FILE")"
+  case "$generated" in
+  ????-??-??T??:??*) generated="${generated:0:16}Z" ;;
+  "") generated="unknown" ;;
+  esac
+  now="$(date +%s)"
+  age=$((now - $(file_mtime "$CATALOG_FILE")))
+  ((age < 0)) && age=0
+  echo "$count plugins · generated $generated · cache age $(human_age "$age")"
+}
+
+cmd_search() {
+  local query="" category="" kind="" sort="stars" limit=0 format="tsv"
+  local verified=0 installed_only=0 not_installed=0 installable=0 refresh=0
+
+  while (($# > 0)); do
+    case "$1" in
+    --category) category="${2:-}"; [[ -n $category ]] || fail "--category requires a value"; shift 2 ;;
+    --kind) kind="${2:-}"; [[ -n $kind ]] || fail "--kind requires a value"; shift 2 ;;
+    --sort)
+      sort="${2:-}"
+      [[ $sort =~ ^(stars|name|updated)$ ]] || fail "--sort must be stars, name, or updated"
+      shift 2
+      ;;
+    --limit)
+      limit="${2:-}"
+      [[ $limit =~ ^[0-9]+$ ]] || fail "--limit requires a non-negative integer"
+      shift 2
+      ;;
+    --verified) verified=1; shift ;;
+    --installed) installed_only=1; shift ;;
+    --not-installed) not_installed=1; shift ;;
+    --installable) installable=1; shift ;;
+    --json) format="json"; shift ;;
+    --tsv) format="tsv"; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      cat <<'USAGE'
+Usage: omarchy-plugin-store search [query] [filters] [--json|--tsv]
+
+Filters
+  --category <C>     case-insensitive exact category match
+  --kind <K>         case-insensitive substring match on kind ("bar" matches "Bar widget")
+  --verified         only verificationStatus == verified
+  --installed        only plugins installed locally
+  --not-installed    only plugins not installed locally
+  --installable      only plugins with installAvailable == true
+  --sort stars|name|updated   default: stars desc, then name
+  --limit N          keep at most N rows
+  --refresh          force a catalog refresh first
+
+Output
+  --tsv (default)    id, name, kind, category, stars, verified, installed
+  --json             slim catalog objects plus installed/enabled booleans
+USAGE
+      return 0
+      ;;
+    -*) fail "unknown search option: $1" ;;
+    *)
+      [[ -z $query ]] || fail "unexpected argument: $1"
+      query="$1"
+      shift
+      ;;
+    esac
+  done
+
+  ensure_cache "$refresh"
+
+  # Installed third-party plugins that the marketplace does not list still show
+  # up (as sparse rows) so that "--installed" is a complete picture of the box.
+  local known extras
+  known="$(jq -c '[.plugins[].id]' "$INDEX_FILE")"
+  extras="$(local_json | jq -c --argjson known "$known" '
+    ($known | map({key: ., value: true}) | from_entries) as $k
+    | [ .[]
+        | select($k[.id] == null)
+        | { id: .id, name: .name, description: "", author: "", version: "",
+            license: "", category: "", kind: ((.kinds // []) | join(", ")),
+            tags: [], stars: 0, status: "", verificationStatus: "",
+            installAvailable: false, installCommand: "", installNote: "",
+            repo: "", repositoryUpdatedAt: "", addedAt: "",
+            previewThumbnail: "", previewImage: "",
+            listingValidatedCommit: "", upstreamValidatedCommit: "" } ]
+  ')"
+  [[ -n $extras ]] || extras="[]"
+
+  local rows
+  rows="$(jq -c \
+    --argjson local "$(local_map)" \
+    --argjson extra "$extras" \
+    --arg q "$query" \
+    --arg category "$category" \
+    --arg kind "$kind" \
+    --argjson verified "$verified" \
+    --argjson installedOnly "$installed_only" \
+    --argjson notInstalled "$not_installed" \
+    --argjson installable "$installable" \
+    --arg sort "$sort" \
+    --argjson limit "$limit" '
+    ($q | ascii_downcase) as $ql
+    | ($category | ascii_downcase) as $cl
+    | ($kind | ascii_downcase) as $kl
+    | [ (.plugins + $extra)[]
+        | . + { installed: ($local[.id] != null),
+                enabled: (($local[.id].enabled) // false) }
+        | select($ql == "" or (
+            ([ .id, .name, .description, .author ] + (.tags // []))
+            | map(ascii_downcase)
+            | any(. != null and (index($ql) != null))
+          ))
+        | select($cl == "" or ((.category // "" | ascii_downcase) == $cl))
+        | select($kl == "" or (((.kind // "" | ascii_downcase) | index($kl)) != null))
+        | select($verified == 0 or (.verificationStatus == "verified"))
+        | select($installedOnly == 0 or .installed)
+        | select($notInstalled == 0 or (.installed | not))
+        | select($installable == 0 or (.installAvailable == true))
+      ]
+    | (if $sort == "name" then sort_by(.name | ascii_downcase)
+       elif $sort == "updated" then (sort_by(.repositoryUpdatedAt) | reverse)
+       else sort_by([ (0 - (.stars // 0)), (.name | ascii_downcase) ])
+       end)
+    | (if $limit > 0 then .[0:$limit] else . end)
+  ' "$INDEX_FILE")"
+
+  if [[ $format == json ]]; then
+    printf '%s' "$rows" | jq '.'
+  else
+    printf '%s' "$rows" | jq -r '
+      .[] | [
+        .id, .name, .kind, .category, ((.stars // 0) | tostring),
+        (if .verificationStatus == "verified" then "✓" else "·" end),
+        (if .enabled then "enabled" elif .installed then "installed" else "" end)
+      ] | map(gsub("[\t\n\r]"; " ")) | join("\t")
+    '
+  fi
+}
+
+join_dot() {
+  local out="" part
+  for part in "$@"; do
+    [[ -n $part ]] || continue
+    if [[ -z $out ]]; then out="$part"; else out="$out · $part"; fi
+  done
+  printf '%s' "$out"
+}
+
+wrap_text() {
+  local text="$1" indent="${2:-  }"
+  [[ -n $text ]] || return 0
+  printf '%s\n' "$text" | fold -s -w 74 | sed "s/^/$indent/" | sed 's/[[:space:]]*$//'
+}
+
+show_human() {
+  local m="$1"
+  local id name desc author version license category kind status verif stars
+  local tags repo updated added installavail installnote installcmd
+  local listed installed enabled dir head branch validated pinned
+
+  eval "$(printf '%s' "$m" | jq -r '
+    "id=" + (.id | @sh),
+    "name=" + (.name | @sh),
+    "desc=" + (.description | @sh),
+    "author=" + (.author | @sh),
+    "version=" + (.version | @sh),
+    "license=" + (.license | @sh),
+    "category=" + (.category | @sh),
+    "kind=" + (.kind | @sh),
+    "status=" + (.status | @sh),
+    "verif=" + (.verificationStatus | @sh),
+    "stars=" + ((.stars // 0) | tostring | @sh),
+    "tags=" + ((.tags // []) | join(", ") | @sh),
+    "repo=" + (.repo | @sh),
+    "updated=" + (.repositoryUpdatedAt | @sh),
+    "added=" + (.addedAt | @sh),
+    "installavail=" + ((.installAvailable | tostring) | @sh),
+    "installnote=" + (.installNote | @sh),
+    "installcmd=" + (.installCommand | @sh),
+    "listed=" + ((.listed | tostring) | @sh),
+    "installed=" + ((.installed | tostring) | @sh),
+    "enabled=" + ((.enabled | tostring) | @sh),
+    "dir=" + (.localDir | @sh),
+    "head=" + (.localHead | @sh),
+    "branch=" + (.localBranch | @sh),
+    "validated=" + (.validatedCommit | @sh),
+    "pinned=" + ((.pinned | tostring) | @sh)
+  ')"
+
+  local title="${name:-$id}"
+  printf '%s%s%s %s(%s)%s\n' "$C_BOLD" "$title" "$C_RESET" "$C_DIM" "$id" "$C_RESET"
+
+  local meta=()
+  [[ -n $author ]] && meta+=("$author")
+  [[ -n $version ]] && meta+=("v$version")
+  [[ -n $license ]] && meta+=("$license")
+  meta+=("★ $stars")
+  printf '  %s\n' "$(join_dot "${meta[@]}")"
+
+  local kindline=()
+  [[ -n $kind ]] && kindline+=("$kind")
+  [[ -n $category ]] && kindline+=("$category")
+  [[ -n $status ]] && kindline+=("$status")
+  ((${#kindline[@]})) && printf '  %s\n' "$(join_dot "${kindline[@]}")"
+
+  case "$verif" in
+  verified) printf '  %s✓ verified%s\n' "$C_GREEN" "$C_RESET" ;;
+  "") ;;
+  *) printf '  %s· %s%s\n' "$C_DIM" "$verif" "$C_RESET" ;;
+  esac
+
+  local dates=()
+  [[ -n $updated ]] && dates+=("updated ${updated:0:10}")
+  [[ -n $added ]] && dates+=("added ${added:0:10}")
+  ((${#dates[@]})) && printf '  %s\n' "$(join_dot "${dates[@]}")"
+
+  if [[ -n $desc ]]; then
+    echo
+    wrap_text "$desc"
+  fi
+
+  [[ -n $tags ]] && printf '\n  %stags:%s %s\n' "$C_DIM" "$C_RESET" "$tags"
+  [[ -n $repo ]] && printf '  %s%s%s\n' "$C_BLUE" "$repo" "$C_RESET"
+
+  printf '\n%sLocal:%s\n' "$C_BOLD" "$C_RESET"
+  if [[ $listed != true ]]; then
+    printf '  %snot listed on the marketplace%s\n' "$C_YELLOW" "$C_RESET"
+  fi
+  if [[ $installed != true ]]; then
+    echo "  not installed"
+  else
+    if [[ $enabled == true ]]; then
+      printf '  installed · %senabled%s\n' "$C_GREEN" "$C_RESET"
+    else
+      printf '  installed · %sdisabled%s\n' "$C_DIM" "$C_RESET"
+    fi
+    [[ -n $dir ]] && echo "  dir: $dir"
+    if [[ -n $head ]]; then
+      echo "  HEAD: ${head:0:7} (${branch:-detached})"
+    elif [[ -n $dir ]]; then
+      echo "  HEAD: not a git checkout"
+    fi
+    if [[ -n $validated ]]; then
+      echo "  validated commit: ${validated:0:7}"
+      if [[ $pinned == true ]]; then
+        printf '  %spinned to validated commit%s\n' "$C_GREEN" "$C_RESET"
+      elif [[ -n $head ]]; then
+        printf '  %sHEAD differs from validated commit (%s vs %s)%s\n' \
+          "$C_YELLOW" "${head:0:7}" "${validated:0:7}" "$C_RESET"
+      fi
+    fi
+  fi
+
+  printf '\n%sInstall:%s\n' "$C_BOLD" "$C_RESET"
+  if [[ $installed == true ]]; then
+    echo "  already installed — update with: omarchy-plugin-store update $id"
+  elif [[ $listed != true ]]; then
+    echo "  not available (plugin is not listed on the marketplace)"
+  elif [[ $installavail == true ]]; then
+    echo "  omarchy-plugin-add $(install_url "$repo") --yes"
+    [[ -n $installcmd ]] && printf '  %slisted as: %s%s\n' "$C_DIM" "$installcmd" "$C_RESET"
+  else
+    if [[ -n $installnote ]]; then
+      printf '  %sunavailable%s\n' "$C_RED" "$C_RESET"
+      wrap_text "$installnote" "  "
+    else
+      printf '  %sunavailable%s\n' "$C_RED" "$C_RESET"
+    fi
+  fi
+}
+
+install_url() {
+  local repo="$1"
+  [[ -n $repo ]] || return 0
+  if [[ $repo == *.git ]]; then
+    printf '%s' "$repo"
+  else
+    printf '%s.git' "$repo"
+  fi
+}
+
+cmd_show() {
+  local id="" format="human" refresh=0
+  while (($# > 0)); do
+    case "$1" in
+    --json) format="json"; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store show <id> [--json]"
+      return 0
+      ;;
+    -*) fail "unknown show option: $1" ;;
+    *)
+      [[ -z $id ]] || fail "unexpected argument: $1"
+      id="$1"
+      shift
+      ;;
+    esac
+  done
+  [[ -n $id ]] || fail "plugin id is required"
+  valid_plugin_id "$id" || fail "invalid plugin id '$id'"
+
+  ensure_cache "$refresh"
+
+  local m
+  m="$(merged_entry "$id")"
+  local listed installed
+  listed="$(printf '%s' "$m" | jq -r '.listed')"
+  installed="$(printf '%s' "$m" | jq -r '.installed')"
+
+  if [[ $listed != true && $installed != true ]]; then
+    fail "no plugin '$id' in the marketplace catalog"
+  fi
+
+  if [[ $format == json ]]; then
+    printf '%s' "$m" | jq '.'
+  else
+    show_human "$m"
+  fi
+}
+
+cmd_thumb() {
+  local id="" detail=0 refresh=0
+  while (($# > 0)); do
+    case "$1" in
+    --detail) detail=1; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store thumb <id> [--detail]"
+      return 0
+      ;;
+    -*) fail "unknown thumb option: $1" ;;
+    *)
+      [[ -z $id ]] || fail "unexpected argument: $1"
+      id="$1"
+      shift
+      ;;
+    esac
+  done
+  [[ -n $id ]] || fail "plugin id is required"
+  valid_plugin_id "$id" || fail "invalid plugin id '$id'"
+
+  ensure_cache "$refresh"
+
+  local entry
+  entry="$(catalog_entry "$id")"
+  [[ -n $entry ]] || fail "no plugin '$id' in the marketplace catalog"
+
+  local rel out
+  if ((detail)); then
+    rel="$(printf '%s' "$entry" | jq -r '.previewImage // ""')"
+    out="$THUMB_DIR/$id.detail.webp"
+  else
+    rel="$(printf '%s' "$entry" | jq -r '.previewThumbnail // ""')"
+    out="$THUMB_DIR/$id.webp"
+  fi
+  [[ -n $rel ]] || fail "plugin '$id' has no preview image"
+
+  mkdir -p "$THUMB_DIR"
+  if [[ ! -s $out ]]; then
+    local tmp
+    tmp="$(mktemp "$THUMB_DIR/.dl.XXXXXX")"
+    if ! curl -fsSL --max-time 20 -o "$tmp" "${ASSET_BASE}${rel}" 2>/dev/null; then
+      rm -f "$tmp"
+      fail "could not download preview for '$id' from ${ASSET_BASE}${rel}"
+    fi
+    if [[ ! -s $tmp ]]; then
+      rm -f "$tmp"
+      fail "empty preview download for '$id'"
+    fi
+    mv -f "$tmp" "$out"
+  fi
+  echo "$out"
+}
+
+installed_rows() {
+  ensure_cache 0
+  local ids id
+  ids="$(local_json | jq -r '.[].id')"
+  [[ -n $ids ]] || return 0
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    merged_entry "$id"
+  done <<<"$ids"
+}
+
+update_status_of() {
+  # args: listed head validated branch
+  local listed="$1" head="$2" validated="$3" branch="$4"
+  if [[ $listed != true || -z $validated || -z $head ]]; then
+    echo "unknown"
+  elif [[ $head == "$validated" ]]; then
+    if [[ $branch == "detached" || -z $branch ]]; then
+      echo "pinned"
+    else
+      echo "at-validated"
+    fi
+  else
+    echo "differs"
+  fi
+}
+
+cmd_installed() {
+  local format="tsv" refresh=0
+  while (($# > 0)); do
+    case "$1" in
+    --json) format="json"; shift ;;
+    --tsv) format="tsv"; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store installed [--json]"
+      return 0
+      ;;
+    *) fail "unknown installed option: $1" ;;
+    esac
+  done
+
+  ensure_cache "$refresh"
+
+  local rows=() m
+  while IFS= read -r m; do
+    [[ -n $m ]] || continue
+    rows+=("$m")
+  done < <(installed_rows)
+
+  if ((${#rows[@]} == 0)); then
+    [[ $format == json ]] && echo "[]"
+    return 0
+  fi
+
+  local out=()
+  for m in "${rows[@]}"; do
+    local id name listed head validated branch enabled st
+    id="$(printf '%s' "$m" | jq -r '.id')"
+    name="$(printf '%s' "$m" | jq -r '.name')"
+    listed="$(printf '%s' "$m" | jq -r '.listed')"
+    head="$(printf '%s' "$m" | jq -r '.localHead')"
+    validated="$(printf '%s' "$m" | jq -r '.validatedCommit')"
+    branch="$(printf '%s' "$m" | jq -r '.localBranch')"
+    enabled="$(printf '%s' "$m" | jq -r '.enabled')"
+    st="$(update_status_of "$listed" "$head" "$validated" "$branch")"
+    if [[ $format == json ]]; then
+      out+=("$(printf '%s' "$m" | jq -c --arg st "$st" '. + {updateStatus: $st}')")
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$id" \
+        "${name:-$id}" \
+        "$([[ $enabled == true ]] && echo enabled || echo disabled)" \
+        "$([[ $listed == true ]] && echo listed || echo unlisted)" \
+        "$st"
+    fi
+  done
+
+  if [[ $format == json ]]; then
+    printf '%s\n' "${out[@]}" | jq -s '.'
+  fi
+}
+
+# ------------------------------------------------------------- mutations ----
+
+after_mutation() {
+  local msg="$1"
+  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  omarchy-notification-send "$msg" >/dev/null 2>&1 || true
+}
+
+announce() {
+  printf '%s+ %s%s\n' "$C_DIM" "$*" "$C_RESET" >&2
+}
+
+checkout_commit() {
+  local dir="$1" sha="$2"
+  if ! git -C "$dir" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    announce "git -C $dir fetch --quiet origin $sha"
+    git -C "$dir" fetch --quiet origin "$sha" 2>/dev/null || true
+  fi
+  announce "git -C $dir checkout --quiet $sha"
+  git -C "$dir" checkout --quiet "$sha" 2>/dev/null
+}
+
+cmd_install() {
+  local id="" section="" pin=0 no_enable=0 refresh=0
+  ASSUME_YES=0
+  while (($# > 0)); do
+    case "$1" in
+    --section)
+      section="${2:-}"
+      [[ $section =~ ^(left|center|right)$ ]] || fail "--section must be left, center, or right"
+      shift 2
+      ;;
+    --pin) pin=1; shift ;;
+    --no-enable) no_enable=1; shift ;;
+    --yes | -y) ASSUME_YES=1; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store install <id> [--section left|center|right] [--pin] [--no-enable] [--yes]"
+      return 0
+      ;;
+    -*) fail "unknown install option: $1" ;;
+    *)
+      [[ -z $id ]] || fail "unexpected argument: $1"
+      id="$1"
+      shift
+      ;;
+    esac
+  done
+  [[ -n $id ]] || fail "plugin id is required"
+  valid_plugin_id "$id" || fail "invalid plugin id '$id'"
+
+  ensure_cache "$refresh"
+
+  local entry
+  entry="$(catalog_entry "$id")"
+  [[ -n $entry ]] || fail "no plugin '$id' in the marketplace catalog"
+
+  if is_installed "$id"; then
+    fail "plugin '$id' is already installed; update it with: omarchy-plugin-store update $id"
+  fi
+
+  local avail note repo url verif stars updated validated
+  avail="$(printf '%s' "$entry" | jq -r '.installAvailable')"
+  note="$(printf '%s' "$entry" | jq -r '.installNote // ""')"
+  repo="$(printf '%s' "$entry" | jq -r '.repo // ""')"
+  verif="$(printf '%s' "$entry" | jq -r 'if (.verificationStatus // "") == "" then "unknown" else .verificationStatus end')"
+  stars="$(printf '%s' "$entry" | jq -r '.stars // 0')"
+  updated="$(printf '%s' "$entry" | jq -r '.repositoryUpdatedAt // ""')"
+  validated="$(printf '%s' "$entry" | jq -r 'if (.upstreamValidatedCommit // "") != "" then .upstreamValidatedCommit else (.listingValidatedCommit // "") end')"
+
+  if [[ $avail != true ]]; then
+    fail "'$id' cannot be installed automatically: ${note:-no install note provided}"
+  fi
+  [[ -n $repo ]] || fail "'$id' has no repository URL"
+  url="$(install_url "$repo")"
+
+  cat >&2 <<WARN
+
+⚠️  Plugins run as arbitrary, unsandboxed code inside your long-lived
+  omarchy-shell process. Only add repos you trust, and review the code
+  before you enable it.
+
+      plugin:   $id
+      repo:     $url
+      verified: $verif
+      stars:    $stars
+      updated:  ${updated:0:10}
+
+WARN
+  confirm "Install '$id'?" || fail "aborted"
+
+  announce "omarchy-plugin-add $url --yes"
+  omarchy-plugin-add "$url" --yes
+
+  local dir="$PLUGINS_DIR/$id"
+
+  if ((pin)); then
+    if [[ -z $validated ]]; then
+      warn "'$id' has no validated commit to pin to"
+    elif [[ ! -d "$dir/.git" ]]; then
+      warn "'$id' is not a git checkout; cannot pin"
+    elif ! checkout_commit "$dir" "$validated"; then
+      warn "could not pin '$id' to $validated"
+    fi
+  fi
+
+  if ((!no_enable)); then
+    if [[ -z $section ]] && interactive && command -v gum >/dev/null 2>&1 &&
+      jq -e '((.kinds // []) | index("bar-widget")) != null and ((.kinds // []) | index("bar")) == null' \
+        "$dir/manifest.json" >/dev/null 2>&1; then
+      local default_section
+      default_section="$(jq -r '.barWidget.defaultSection // "center"' "$dir/manifest.json" 2>/dev/null || echo center)"
+      section="$(printf '%s\n' left center right |
+        gum choose --header="Place $id in which bar section?" --selected "$default_section" || true)"
+    fi
+    if [[ -n $section ]]; then
+      announce "omarchy-plugin-enable $id --section $section"
+      omarchy-plugin-enable "$id" --section "$section"
+    else
+      announce "omarchy-plugin-enable $id"
+      omarchy-plugin-enable "$id"
+    fi
+  fi
+
+  after_mutation "Installed $id"
+}
+
+resolve_installed_dir() {
+  local id="$1"
+  local dir="$PLUGINS_DIR/$id"
+  [[ -d $dir ]] || fail "plugin '$id' is not installed"
+  [[ -d "$dir/.git" ]] || fail "plugin '$id' is not a git checkout"
+  printf '%s' "$dir"
+}
+
+cmd_pin() {
+  local id="" refresh=0
+  while (($# > 0)); do
+    case "$1" in
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      echo "Usage: omarchy-plugin-store pin <id>"
+      return 0
+      ;;
+    -*) fail "unknown pin option: $1" ;;
+    *)
+      [[ -z $id ]] || fail "unexpected argument: $1"
+      id="$1"; shift
+      ;;
+    esac
+  done
+  [[ -n $id ]] || fail "plugin id is required"
+  valid_plugin_id "$id" || fail "invalid plugin id '$id'"
+
+  ensure_cache "$refresh"
+  local entry validated dir
+  entry="$(catalog_entry "$id")"
+  [[ -n $entry ]] || fail "plugin '$id' is not listed on the marketplace; nothing to pin to"
+  validated="$(printf '%s' "$entry" | jq -r 'if (.upstreamValidatedCommit // "") != "" then .upstreamValidatedCommit else (.listingValidatedCommit // "") end')"
+  [[ -n $validated ]] || fail "plugin '$id' has no validated commit"
+  dir="$(resolve_installed_dir "$id")"
+
+  checkout_commit "$dir" "$validated" || fail "could not check out $validated in $dir"
+  after_mutation "Pinned $id to ${validated:0:7}"
+  echo "Pinned $id to ${validated:0:7}"
+}
+
+cmd_unpin() {
+  local id=""
+  while (($# > 0)); do
+    case "$1" in
+    -h | --help)
+      echo "Usage: omarchy-plugin-store unpin <id>"
+      return 0
+      ;;
+    -*) fail "unknown unpin option: $1" ;;
+    *)
+      [[ -z $id ]] || fail "unexpected argument: $1"
+      id="$1"; shift
+      ;;
+    esac
+  done
+  [[ -n $id ]] || fail "plugin id is required"
+  valid_plugin_id "$id" || fail "invalid plugin id '$id'"
+
+  local dir branch
+  dir="$(resolve_installed_dir "$id")"
+
+  branch="$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -z $branch ]]; then
+    announce "git -C $dir remote set-head origin --auto"
+    git -C "$dir" remote set-head origin --auto >/dev/null 2>&1 || true
+    branch="$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  fi
+  [[ -n $branch ]] || fail "could not determine the default branch for '$id'"
+  branch="${branch#origin/}"
+
+  announce "git -C $dir checkout --quiet $branch"
+  git -C "$dir" checkout --quiet "$branch" || fail "could not check out '$branch' in $dir"
+  after_mutation "Unpinned $id (on $branch)"
+  echo "Unpinned $id; now on $branch"
+}
+
+self_guard() {
+  local verb="$1" id="$2"
+  shift 2
+  [[ $id == "$SELF_ID" ]] || return 0
+  local arg
+  for arg in "$@"; do
+    [[ $arg == "--yes" || $arg == "-y" ]] && return 0
+  done
+  fail "'$id' is the plugin store itself; re-run '$verb $id --yes' if you really mean it"
+}
+
+cmd_enable() {
+  local args=("$@")
+  [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && {
+    echo "Usage: omarchy-plugin-store enable <id> [--section left|center|right]"
+    return 0
+  }
+  [[ ${1:-} != "" ]] || fail "plugin id is required"
+  announce "omarchy-plugin-enable ${args[*]}"
+  omarchy-plugin-enable "${args[@]}"
+  after_mutation "Enabled $1"
+}
+
+cmd_disable() {
+  [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && {
+    echo "Usage: omarchy-plugin-store disable <id> [--yes]"
+    return 0
+  }
+  [[ ${1:-} != "" ]] || fail "plugin id is required"
+  local id="$1"
+  self_guard disable "$@"
+  local args=()
+  local a
+  for a in "$@"; do
+    [[ $a == "--yes" || $a == "-y" ]] && continue
+    args+=("$a")
+  done
+  announce "omarchy-plugin-disable ${args[*]}"
+  omarchy-plugin-disable "${args[@]}"
+  after_mutation "Disabled $id"
+}
+
+cmd_remove() {
+  [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && {
+    echo "Usage: omarchy-plugin-store remove <id> [--yes]"
+    return 0
+  }
+  [[ ${1:-} != "" ]] || fail "plugin id is required"
+  local id="$1"
+  self_guard remove "$@"
+  announce "omarchy-plugin-remove $*"
+  omarchy-plugin-remove "$@"
+  after_mutation "Removed $id"
+}
+
+cmd_update() {
+  [[ ${1:-} == "-h" || ${1:-} == "--help" ]] && {
+    echo "Usage: omarchy-plugin-store update [id] [--yes]"
+    return 0
+  }
+  announce "omarchy-plugin-update $*"
+  omarchy-plugin-update "$@"
+  after_mutation "Updated ${1:-plugins}"
+}
+
+# ------------------------------------------------------------------ tui -----
+
+cmd_tui_list() {
+  # hidden helper used by the fzf reload/preview bindings
+  local statefile="$1" query="${2:-}"
+  shift 2 || true
+  local toggle=0 refresh=0
+  while (($# > 0)); do
+    case "$1" in
+    --toggle) toggle=1; shift ;;
+    --refresh) refresh=1; shift ;;
+    *) shift ;;
+    esac
+  done
+
+  local mode="all"
+  [[ -s $statefile ]] && mode="$(cat "$statefile")"
+  if ((toggle)); then
+    [[ $mode == all ]] && mode="installed" || mode="all"
+    printf '%s' "$mode" >"$statefile"
+  fi
+
+  local args=(search --tsv)
+  ((refresh)) && args+=(--refresh)
+  [[ $mode == installed ]] && args+=(--installed)
+  [[ -n $query ]] && args+=("$query")
+  cmd_search "${args[@]:1}"
+}
+
+cmd_tui() {
+  local query=""
+  while (($# > 0)); do
+    case "$1" in
+    -h | --help)
+      cat <<'USAGE'
+Usage: omarchy-plugin-store tui [initial-query]
+
+Keys
+  enter     action menu for the highlighted plugin
+  ctrl-r    refresh the catalog
+  ctrl-i    toggle installed-only
+  ctrl-o    open the plugin repo in a browser
+  esc       quit
+USAGE
+      return 0
+      ;;
+    -*) fail "unknown tui option: $1" ;;
+    *)
+      [[ -z $query ]] || fail "unexpected argument: $1"
+      query="$1"; shift
+      ;;
+    esac
+  done
+
+  command -v fzf >/dev/null 2>&1 || fail "fzf is required for the tui"
+  ensure_cache 0
+
+  local statefile
+  statefile="$(mktemp "$CACHE_DIR/.tui.XXXXXX")"
+  printf 'all' >"$statefile"
+
+  local self_q sf_q query_q
+  self_q="$(printf '%q' "$SELF")"
+  sf_q="$(printf '%q' "$statefile")"
+  query_q="$(printf '%q' "$query")"
+
+  while true; do
+    local out key row id
+    out="$("$SELF" __tui-list "$statefile" "$query" |
+      fzf --ansi \
+        --delimiter=$'\t' \
+        --with-nth=2,3,4,5,6,7 \
+        --nth=1,2 \
+        --header='enter: actions · ctrl-r: refresh catalog · ctrl-i: toggle installed-only · ctrl-o: open repo · esc: quit' \
+        --preview="$self_q show {1}" \
+        --preview-window='right,55%,wrap' \
+        --bind="ctrl-r:reload($self_q __tui-list $sf_q $query_q --refresh)" \
+        --bind="ctrl-i:reload($self_q __tui-list $sf_q $query_q --toggle)" \
+        --bind="ctrl-o:execute-silent(xdg-open \"\$($self_q show {1} --json | jq -r '.repo // empty')\" >/dev/null 2>&1)" \
+        --expect=enter)" || true
+
+    key="$(printf '%s' "$out" | sed -n '1p')"
+    row="$(printf '%s' "$out" | sed -n '2p')"
+    [[ $key == enter ]] || break
+    [[ -n $row ]] || break
+    id="${row%%$'\t'*}"
+    [[ -n $id ]] || continue
+
+    tui_actions "$id" || break
+  done
+
+  rm -f "$statefile"
+}
+
+tui_actions() {
+  local id="$1"
+  local m installed enabled listed avail pinned validated repo
+  m="$("$SELF" show "$id" --json 2>/dev/null || true)"
+  [[ -n $m ]] || return 0
+  installed="$(printf '%s' "$m" | jq -r '.installed')"
+  enabled="$(printf '%s' "$m" | jq -r '.enabled')"
+  listed="$(printf '%s' "$m" | jq -r '.listed')"
+  avail="$(printf '%s' "$m" | jq -r '.installAvailable')"
+  pinned="$(printf '%s' "$m" | jq -r '.pinned')"
+  validated="$(printf '%s' "$m" | jq -r '.validatedCommit')"
+  repo="$(printf '%s' "$m" | jq -r '.repo // ""')"
+
+  local actions=()
+  [[ $installed != true && $avail == true ]] && actions+=("install")
+  if [[ $installed == true ]]; then
+    [[ $enabled == true ]] && actions+=("disable") || actions+=("enable")
+    actions+=("update")
+    if [[ $listed == true && -n $validated ]]; then
+      [[ $pinned == true ]] && actions+=("unpin") || actions+=("pin")
+    fi
+    actions+=("remove")
+  fi
+  [[ -n $repo ]] && actions+=("open repo")
+  actions+=("back")
+
+  local choice
+  if command -v gum >/dev/null 2>&1; then
+    choice="$(printf '%s\n' "${actions[@]}" | gum choose --header="$id" || true)"
+  else
+    choice="$(printf '%s\n' "${actions[@]}" | fzf --prompt="$id > " || true)"
+  fi
+  [[ -n $choice && $choice != back ]] || return 0
+
+  case "$choice" in
+  "open repo") xdg-open "$repo" >/dev/null 2>&1 || true; return 0 ;;
+  install) "$SELF" install "$id" || true ;;
+  enable) "$SELF" enable "$id" || true ;;
+  disable) "$SELF" disable "$id" || true ;;
+  update) "$SELF" update "$id" || true ;;
+  pin) "$SELF" pin "$id" || true ;;
+  unpin) "$SELF" unpin "$id" || true ;;
+  remove) "$SELF" remove "$id" || true ;;
+  esac
+
+  echo >&2
+  read -rsn1 -p "Press any key to return to the list…" _ || true
+  echo >&2
+  return 0
+}
+
+# ------------------------------------------------------------------ main ----
+
+ASSUME_YES=0
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift || true
+
+  case "$cmd" in
+  "" | -h | --help | help) usage ;;
+  catalog) cmd_catalog "$@" ;;
+  search) cmd_search "$@" ;;
+  show) cmd_show "$@" ;;
+  thumb) cmd_thumb "$@" ;;
+  installed) cmd_installed "$@" ;;
+  install) cmd_install "$@" ;;
+  pin) cmd_pin "$@" ;;
+  unpin) cmd_unpin "$@" ;;
+  enable) cmd_enable "$@" ;;
+  disable) cmd_disable "$@" ;;
+  remove) cmd_remove "$@" ;;
+  update) cmd_update "$@" ;;
+  tui) cmd_tui "$@" ;;
+  __tui-list) cmd_tui_list "$@" ;;
+  *) fail "unknown command: $cmd (try --help)" ;;
+  esac
+}
+
+main "$@"

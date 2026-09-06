@@ -1,0 +1,15 @@
+#!/bin/bash
+# Test shim: a fixed plugin list.
+#   acme.clock    third-party, enabled, listed in the fixture catalog
+#   zeta.overlay  third-party, disabled, listed in the fixture catalog
+#   local.only    third-party, disabled, NOT in the fixture catalog
+#   omarchy.clock first-party, must be ignored by the store
+
+cat <<'JSON'
+[
+  {"id":"omarchy.clock","name":"Clock","kinds":["bar-widget"],"enabled":true,"active":false,"canDisable":true,"firstParty":true,"clonedFrom":""},
+  {"id":"acme.clock","name":"Acme Clock","kinds":["bar-widget"],"enabled":true,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":"https://github.com/acme/omarchy-clock.git"},
+  {"id":"zeta.overlay","name":"Zeta Overlay","kinds":["overlay"],"enabled":false,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":"https://github.com/zeta/omarchy-overlay.git"},
+  {"id":"local.only","name":"Local Only","kinds":["service"],"enabled":false,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":""}
+]
+JSON

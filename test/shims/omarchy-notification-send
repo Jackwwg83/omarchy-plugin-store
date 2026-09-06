@@ -1,0 +1,4 @@
+#!/bin/bash
+# Test shim: record the argv and succeed. Never touches the real system.
+printf '%s %s\n' "$0" "$*" >>"${SHIM_LOG:-/dev/null}"
+exit 0
