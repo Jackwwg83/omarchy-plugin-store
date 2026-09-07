@@ -15,7 +15,7 @@ Mutations are never done by hand: the store shells out to the stock
 ## Install
 
 ```bash
-git clone https://github.com/jackom/omarchy-plugin-store.git
+git clone https://github.com/Jackwwg83/omarchy-plugin-store.git
 cd omarchy-plugin-store
 ln -sf "$PWD/bin/omarchy-plugin-store" ~/.local/bin/omarchy-plugin-store
 ```
@@ -137,7 +137,7 @@ what the CLI reports.
 ### Install
 
 ```bash
-omarchy plugin add https://github.com/jackom/omarchy-plugin-store.git --enable
+omarchy plugin add https://github.com/Jackwwg83/omarchy-plugin-store.git --enable
 ```
 
 Then bind a key by adding this line to `~/.config/hypr/bindings.lua`:
