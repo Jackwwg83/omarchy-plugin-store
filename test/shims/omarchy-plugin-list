@@ -4,12 +4,26 @@
 #   zeta.overlay  third-party, disabled, listed in the fixture catalog
 #   local.only    third-party, disabled, NOT in the fixture catalog
 #   omarchy.clock first-party, must be ignored by the store
+#
+# Discovery simulation: once the shim log shows an omarchy-plugin-add call, the
+# ids in $SHIM_DISCOVER_IDS (space-separated) appear as freshly added,
+# disabled third-party plugins — the way the real shell picks a new checkout
+# up only after its asynchronous rescan.
 
-cat <<'JSON'
-[
+base='[
   {"id":"omarchy.clock","name":"Clock","kinds":["bar-widget"],"enabled":true,"active":false,"canDisable":true,"firstParty":true,"clonedFrom":""},
   {"id":"acme.clock","name":"Acme Clock","kinds":["bar-widget"],"enabled":true,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":"https://github.com/acme/omarchy-clock.git"},
   {"id":"zeta.overlay","name":"Zeta Overlay","kinds":["overlay"],"enabled":false,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":"https://github.com/zeta/omarchy-overlay.git"},
   {"id":"local.only","name":"Local Only","kinds":["service"],"enabled":false,"active":false,"canDisable":true,"firstParty":false,"clonedFrom":""}
-]
-JSON
+]'
+
+extra=""
+if [[ -n ${SHIM_DISCOVER_IDS:-} && -s ${SHIM_LOG:-/dev/null} ]] && grep -q 'omarchy-plugin-add' "$SHIM_LOG"; then
+  extra="$SHIM_DISCOVER_IDS"
+fi
+
+jq -c --arg extra "$extra" '
+  . + ($extra | split(" ") | map(select(. != "")) | map({
+    id: ., name: ., kinds: ["bar-widget"], enabled: false, active: false,
+    canDisable: true, firstParty: false, clonedFrom: ""
+  }))' <<<"$base"

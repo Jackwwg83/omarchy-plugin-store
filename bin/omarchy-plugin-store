@@ -234,6 +234,25 @@ is_enabled() {
   local_json | jq -e --arg id "$1" 'any(.[]; .id == $id and .enabled)' >/dev/null 2>&1
 }
 
+# omarchy-plugin-add drops the checkout on disk and the shell discovers it
+# asynchronously; omarchy-plugin-enable refuses an id the shell has not seen
+# yet. Mirror omarchy-plugin-add --enable: poke the shell, then poll the live
+# list (never the cached local_json) until the id shows up.
+DISCOVERY_ATTEMPTS="${OMARCHY_PLUGIN_STORE_DISCOVERY_ATTEMPTS:-40}"
+wait_for_plugin_known() {
+  local id="$1" attempt
+  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  for ((attempt = 0; attempt < DISCOVERY_ATTEMPTS; attempt++)); do
+    if omarchy-plugin-list --json 2>/dev/null |
+      jq -e --arg id "$id" 'any(.[]?; .id == $id)' >/dev/null 2>&1; then
+      LOCAL_JSON=""
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 git_head() {
   git -C "$1" rev-parse HEAD 2>/dev/null || true
 }
@@ -1078,6 +1097,8 @@ WARN
   fi
 
   if ((!no_enable)); then
+    wait_for_plugin_known "$id" ||
+      fail "added '$id' but omarchy-shell has not discovered it yet; enable it with: omarchy-plugin-store enable $id"
     if [[ -z $section ]] && interactive && command -v gum >/dev/null 2>&1 &&
       jq -e '((.kinds // []) | index("bar-widget")) != null and ((.kinds // []) | index("bar")) == null' \
         "$dir/manifest.json" >/dev/null 2>&1; then

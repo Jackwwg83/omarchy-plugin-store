@@ -458,6 +458,30 @@ assert_eq "install without --yes non-interactively exits 1" 1 "$RC"
 assert_contains "install without --yes asks for it" "$ERR" "pass --yes"
 assert_not_contains "install without --yes runs nothing" "$(log)" "omarchy-plugin-add"
 
+# The list shim only reports bara.bar after an add has been logged, so this
+# also exercises the post-add discovery wait.
+export SHIM_DISCOVER_IDS="bara.bar"
+export OMARCHY_PLUGIN_STORE_DISCOVERY_ATTEMPTS=5
+reset_log
+store install bara.bar --yes --section right
+assert_eq "install --yes exits 0" 0 "$RC"
+RESCAN_LINE="$(grep -n 'omarchy-shell shell rescanPlugins' "$SHIM_LOG" | head -1 | cut -d: -f1)"
+ENABLE_LINE="$(grep -n 'omarchy-plugin-enable' "$SHIM_LOG" | head -1 | cut -d: -f1)"
+if [[ -n $RESCAN_LINE && -n $ENABLE_LINE && $RESCAN_LINE -lt $ENABLE_LINE ]]; then
+  ok "install rescans the shell before it enables"
+else
+  bad "install rescans the shell before it enables" "rescan=$RESCAN_LINE enable=$ENABLE_LINE"
+fi
+
+# Shell never discovers the plugin: install must not call enable, must say so,
+# and must leave a hint about enabling later.
+SHIM_DISCOVER_IDS="" reset_log
+SHIM_DISCOVER_IDS="" store install bara.bar --yes --section right
+assert_eq "install exits 1 when the shell never discovers the plugin" 1 "$RC"
+assert_contains "install explains the missed discovery" "$ERR" "has not discovered it yet"
+assert_contains "install hints at enabling later" "$ERR" "omarchy-plugin-store enable bara.bar"
+assert_not_contains "install skips enable when undiscovered" "$(log)" "omarchy-plugin-enable"
+
 reset_log
 store install bara.bar --yes --section right
 assert_eq "install --yes exits 0" 0 "$RC"
