@@ -147,7 +147,7 @@ assert_eq "index ids are sorted and empty ids dropped" \
   "$(jq -r '[.plugins[].id] | join(" ")' "$CACHE/index.json")"
 
 assert_eq "index slim field set is exact" \
-  "addedAt author category description id installAvailable installCommand installNote kind license listingValidatedCommit name previewImage previewThumbnail repo repositoryUpdatedAt stars status tags upstreamValidatedCommit verificationStatus version" \
+  "addedAt author category description id initials installAvailable installCommand installNote kind license listingValidatedCommit name previewImage previewThumbnail repo repositoryUpdatedAt stars status tags upstreamValidatedCommit verificationStatus version" \
   "$(jq -r '[.plugins[0] | keys[]] | sort | join(" ")' "$CACHE/index.json")"
 
 assert_eq "null stars default to 0" "0" \
@@ -156,6 +156,15 @@ assert_eq "null tags default to []" "0" \
   "$(jq -r '.plugins[] | select(.id=="nul.thing") | .tags | length' "$CACHE/index.json")"
 assert_eq "null installAvailable defaults to false" "false" \
   "$(jq -r '.plugins[] | select(.id=="nul.thing") | .installAvailable' "$CACHE/index.json")"
+
+assert_eq "index stamps its schema version" "2" \
+  "$(jq -r '.indexVersion' "$CACHE/index.json")"
+assert_eq "initials are derived from the first two words of the name" "AC" \
+  "$(jq -r '.plugins[] | select(.id=="acme.clock") | .initials' "$CACHE/index.json")"
+assert_eq "initials fall back to one letter for a one-word name" "ZO" \
+  "$(jq -r '.plugins[] | select(.id=="zeta.overlay") | .initials' "$CACHE/index.json")"
+assert_eq "catalog-supplied initials win over the derived ones" "XY" \
+  "$(jq -r '.plugins[] | select(.id=="lacuna.suite") | .initials' "$CACHE/index.json")"
 
 store catalog --quiet
 assert_eq "catalog --quiet prints nothing" "" "$OUT"
@@ -280,6 +289,16 @@ assert_eq "--json enabled false for disabled install" "false" \
   "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="zeta.overlay") | .enabled')"
 assert_eq "--json installed false for uninstalled" "false" \
   "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="nul.thing") | .installed')"
+assert_eq "--json hasPreview true when the catalog has a thumbnail" "true" \
+  "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="acme.clock") | .hasPreview')"
+assert_eq "--json hasPreview false without a thumbnail" "false" \
+  "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="zeta.overlay") | .hasPreview')"
+assert_eq "--json carries initials" "AC" \
+  "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="acme.clock") | .initials')"
+assert_eq "--json initials for an unlisted installed plugin" "LO" \
+  "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="local.only") | .initials')"
+assert_eq "--json hasPreview false for an unlisted installed plugin" "false" \
+  "$(printf '%s' "$OUT" | jq -r '.[] | select(.id=="local.only") | .hasPreview')"
 
 # ---------------------------------------------------------------- 6. show ---
 
@@ -293,6 +312,18 @@ store show acme.clock --json
 assert_eq "show --json pinned=false before pin" "false" "$(printf '%s' "$OUT" | jq -r '.pinned')"
 assert_eq "show --json validatedCommit" "$ACME_SHA1" "$(printf '%s' "$OUT" | jq -r '.validatedCommit')"
 assert_eq "show --json localBranch" "main" "$(printf '%s' "$OUT" | jq -r '.localBranch')"
+assert_eq "show --json hasPreview" "true" "$(printf '%s' "$OUT" | jq -r '.hasPreview')"
+assert_eq "show --json initials" "AC" "$(printf '%s' "$OUT" | jq -r '.initials')"
+
+store show zeta.overlay --json
+assert_eq "show --json hasPreview false without a thumbnail" "false" \
+  "$(printf '%s' "$OUT" | jq -r '.hasPreview')"
+
+store show local.only --json
+assert_eq "show --json hasPreview false for an unlisted plugin" "false" \
+  "$(printf '%s' "$OUT" | jq -r '.hasPreview')"
+assert_eq "show --json initials from the local name" "LO" \
+  "$(printf '%s' "$OUT" | jq -r '.initials')"
 
 reset_log
 store pin acme.clock
@@ -363,6 +394,61 @@ assert_contains "thumb without preview explains" "$ERR" "no preview image"
 
 store thumb no.such.plugin
 assert_eq "thumb for unknown id exits 1" 1 "$RC"
+
+# -------------------------------------------------------------- 7b. thumbs ---
+
+rm -rf "$CACHE/thumbs"
+
+store thumbs acme.clock zeta.overlay
+assert_eq "thumbs exits 0 when at least one preview exists" 0 "$RC"
+assert_eq "thumbs prints one id<TAB>path line per preview" \
+  "acme.clock	$CACHE/thumbs/acme.clock.webp" "$OUT"
+assert_contains "thumbs counts the skipped ids on stderr" "$ERR" "1 of 2 previews unavailable"
+if [[ -s $CACHE/thumbs/acme.clock.webp ]]; then ok "thumbs downloads the file"; else bad "thumbs downloads the file"; fi
+
+store thumbs acme.clock
+assert_eq "thumbs stays quiet when nothing is missing" "" "$ERR"
+
+store thumbs --json acme.clock zeta.overlay
+assert_eq "thumbs --json maps id to path" "$CACHE/thumbs/acme.clock.webp" \
+  "$(printf '%s' "$OUT" | jq -r '."acme.clock"')"
+assert_eq "thumbs --json omits ids without a preview" "null" \
+  "$(printf '%s' "$OUT" | jq -r '."zeta.overlay"')"
+
+store thumbs --detail acme.clock
+assert_eq "thumbs --detail uses the detail image" \
+  "acme.clock	$CACHE/thumbs/acme.clock.detail.webp" "$OUT"
+
+store thumbs zeta.overlay lacuna.suite
+assert_eq "thumbs exits 1 when every requested id failed" 1 "$RC"
+assert_eq "thumbs prints nothing on stdout when all failed" "" "$OUT"
+
+store thumbs --json zeta.overlay
+assert_eq "thumbs --json still prints an object when all failed" "{}" "$OUT"
+
+store thumbs
+assert_eq "thumbs with no ids exits 0" 0 "$RC"
+assert_eq "thumbs with no ids prints nothing" "" "$OUT"
+
+store thumbs no.such.plugin
+assert_eq "thumbs skips ids that are not in the catalog" 1 "$RC"
+
+store thumbs "../../etc/passwd"
+assert_eq "thumbs rejects a traversing id" 1 "$RC"
+assert_eq "thumbs prints nothing for a traversing id" "" "$OUT"
+
+OUT="$(printf 'acme.clock\nzeta.overlay\n' | "$BIN" thumbs 2>"$WORK/stderr")"
+RC=$?
+assert_eq "thumbs reads ids from stdin" "acme.clock	$CACHE/thumbs/acme.clock.webp" "$OUT"
+assert_eq "thumbs from stdin exits 0" 0 "$RC"
+
+store thumbs --bogus
+assert_eq "unknown thumbs flag exits 1" 1 "$RC"
+
+# Downloading many at once must not lose or duplicate lines.
+rm -rf "$CACHE/thumbs"
+store thumbs acme.clock acme.clock zeta.overlay bara.bar nul.thing lacuna.suite
+assert_eq "thumbs de-duplicates ids" "1" "$(printf '%s\n' "$OUT" | grep -c 'acme.clock')"
 
 # ------------------------------------------------------------- 8. install ---
 
@@ -471,7 +557,7 @@ assert_eq "--help exits 0" 0 "$RC"
 assert_contains "--help lists subcommands" "$OUT" "omarchy-plugin-store <command>"
 store
 assert_contains "bare command prints usage" "$OUT" "Usage: omarchy-plugin-store"
-for sub in catalog search show thumb installed install enable disable remove update tui pin unpin; do
+for sub in catalog search show thumb thumbs installed install enable disable remove update tui pin unpin; do
   store "$sub" --help
   if [[ $RC -eq 0 && -n $OUT ]]; then
     ok "$sub --help"

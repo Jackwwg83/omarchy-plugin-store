@@ -3,9 +3,10 @@
 Browse and manage [Omarchy Quattro](https://omarchy.org) shell plugins from the
 official marketplace at `https://plugins.omarchy.org`, from the terminal.
 
-One bash engine (`bash` + `jq` + `curl`) with two frontends: an `fzf` TUI
-(shipping now) and a Quickshell overlay (phase 2). Every command has a
-`--json` mode so the overlay — or any script — can consume it.
+One bash engine (`bash` + `jq` + `curl`) with two frontends: an `fzf` TUI and a
+Quickshell overlay that renders a thumbnail grid of the marketplace. Every
+command has a `--json` mode, and the overlay is nothing but a renderer on top of
+them — no plugin management is reimplemented in QML.
 
 Mutations are never done by hand: the store shells out to the stock
 `omarchy-plugin-add|enable|disable|remove|update` commands, so
@@ -36,6 +37,7 @@ omarchy-plugin-store <command> [options]
 | `search [query] [filters]` | search the catalog; TSV by default, `--json` for structured output |
 | `show <id> [--json]` | one merged card: marketplace metadata + local checkout state |
 | `thumb <id> [--detail]` | print the path of the cached preview image, downloading it on demand |
+| `thumbs [--detail] [--json] <id>...` | fetch many previews at once, 8 in parallel; prints `id<TAB>path` per hit |
 | `installed [--json]` | third-party plugins on this machine and how they compare to the marketplace |
 | `tui [query]` | interactive browser |
 
@@ -55,6 +57,17 @@ omarchy-plugin-store <command> [options]
 
 The query matches case-insensitively against `id`, `name`, `description`,
 `author`, and any tag.
+
+`search --json` and `show --json` also carry two fields the catalog does not
+print verbatim, so a grid can draw a cell without a `thumb` round trip:
+
+* `hasPreview` — whether a card thumbnail exists at all.
+* `initials` — the catalog's own `initials`, or the first letters of the first
+  two words of `name`, for the placeholder tile.
+
+`thumbs` reads ids from `stdin` when none are given, skips ids without a
+preview (reporting the count on stderr), exits `0` when at least one succeeded
+or nothing was asked for, and `1` when every requested id failed.
 
 TSV columns (no header, tabs, seven fields):
 
@@ -113,6 +126,87 @@ to run without `--yes`.
 
 The preview pane on the right is `omarchy-plugin-store show <id>`.
 
+## Overlay
+
+The repo is also an Omarchy shell plugin (`jackom.plugin-store`, kind
+`overlay`): a centered card with a thumbnail grid of the whole marketplace on
+the left and a detail pane with context-aware actions on the right. It shells
+out to `bin/omarchy-plugin-store` for everything, so what you see is exactly
+what the CLI reports.
+
+### Install
+
+```bash
+omarchy plugin add https://github.com/jackom/omarchy-plugin-store.git --enable
+```
+
+Then bind a key by adding this line to `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + SHIFT + P", "Plugin store", "omarchy-shell shell toggle jackom.plugin-store")
+```
+
+Or summon it straight from a terminal:
+
+```bash
+omarchy-shell shell toggle jackom.plugin-store        # also: summon / hide
+omarchy-shell shell summon jackom.plugin-store '{"tab":"installed"}'
+omarchy-shell shell summon jackom.plugin-store '{"query":"clock"}'
+```
+
+The payload is optional JSON; `tab` (`browse` | `installed`) and `query` are
+honored.
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| any printable character | append to the search box; filtering is instant and client-side |
+| `backspace` / `ctrl+backspace` / `ctrl+u` | delete a character / a word / the whole query |
+| `esc` | clear the query, then close on the next press |
+| `↑ ↓ ← →`, `pgup`/`pgdn`, `home`/`end` | move the grid cursor |
+| `enter` | primary action for the cursor cell — Install (opens the confirm dialog) or Enable/Disable |
+| `tab` | switch Browse / Installed |
+| `ctrl+r` | refresh the catalog from the network |
+| `ctrl+o` | open the plugin's repository in a browser |
+| `ctrl+v` | toggle the Verified filter |
+
+Mouse: hover moves the cursor, click selects, double-click runs the primary
+action, a click outside the card closes it.
+
+### Consent
+
+The shell is non-interactive, so every mutation runs the CLI with `--yes` and
+the overlay owns the consent step itself. Install and Remove open a
+`Ui/ConfirmDialog` first — Install spells out that plugins are unsandboxed code
+inside your shell process, together with the id, verification status, stars,
+last-updated date, repo URL, and whether it will be pinned to the validated
+commit. Enable, Disable, Update, Pin and Unpin apply directly. The store
+refuses to remove or disable itself; those buttons are greyed out with a
+tooltip, and the CLI guard is the backstop.
+
+### Dev loop
+
+```bash
+scripts/dev-install.sh          # rsync the tree into ~/.config/omarchy/plugins/jackom.plugin-store/ + rescan
+omarchy-shell shell toggle jackom.plugin-store
+scripts/dev-uninstall.sh        # disable, delete, rescan
+```
+
+`dev-install.sh` runs `omarchy plugin validate` first and refuses to copy a
+folder the shell would reject. Editing files inside the plugin directory makes
+the shell log `Local plugin changed, reloading`, but a structural QML edit is
+not always picked up by that in-process reload — when the overlay still shows
+the old layout, `omarchy-restart-shell` is the reliable refresh.
+
+Debugging:
+
+```bash
+journalctl --user -n 200 --no-pager | grep -iE "plugin-store|qml"
+omarchy plugin validate .
+grim -o eDP-1 /tmp/store.png
+```
+
 ## Configuration
 
 All optional; they exist mostly so the test suite can run fully offline.
@@ -134,6 +228,9 @@ index.json            a slimmed, id-sorted projection used by every read command
 thumbs/<id>.webp      card previews (720x405)
 thumbs/<id>.detail.webp   detail previews (1600x900)
 ```
+
+`index.json` carries an `indexVersion`; bumping it in the script rebuilds a
+cache written by an older build instead of serving it without the new fields.
 
 If a refresh fails but a cached catalog exists, the store warns on stderr and
 keeps working with the stale copy. `stdout` is always data; progress, warnings

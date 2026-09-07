@@ -23,6 +23,10 @@ CATALOG_FILE="$CACHE_DIR/catalog.json"
 INDEX_FILE="$CACHE_DIR/index.json"
 THUMB_DIR="$CACHE_DIR/thumbs"
 
+# Bumped whenever slim_program's field set changes, so an index.json written by
+# an older build is rebuilt instead of silently missing the new fields.
+INDEX_VERSION=2
+
 fail() {
   echo "omarchy-plugin-store: $*" >&2
   exit 1
@@ -78,9 +82,27 @@ human_age() {
   fi
 }
 
+# jq helper shared by the index builder and the search/show projections so a
+# catalog without an `initials` field still gives the grid a placeholder.
+JQ_INITIALS='
+def derive_initials($raw):
+  ([$raw | splits("[^\\p{L}\\p{N}]+")]
+   | map(select(. != ""))
+   | .[0:2]
+   | map(.[0:1] | ascii_upcase)
+   | join(""));
+def initials_of:
+  (((.initials // "") | tostring)) as $given
+  | if $given != "" then $given else derive_initials(((.name // "") | tostring)) end;
+'
+
 slim_program() {
-  cat <<'JQ'
+  printf '%s\n' "$JQ_INITIALS"
+  cat <<JQ
 {
+  indexVersion: $INDEX_VERSION,
+JQ
+  cat <<'JQ'
   generatedAt: (.generatedAt // ""),
   plugins: [
     .plugins[]?
@@ -107,7 +129,8 @@ slim_program() {
         previewThumbnail: (.previewThumbnail // "" | tostring),
         previewImage: (.previewImage // "" | tostring),
         listingValidatedCommit: (.listingValidatedCommit // "" | tostring),
-        upstreamValidatedCommit: (.upstreamValidatedCommit // "" | tostring)
+        upstreamValidatedCommit: (.upstreamValidatedCommit // "" | tostring),
+        initials: initials_of
       }
   ] | sort_by(.id)
 }
@@ -169,7 +192,8 @@ ensure_cache() {
     fi
   fi
 
-  if [[ ! -s $INDEX_FILE || $INDEX_FILE -ot $CATALOG_FILE ]]; then
+  if [[ ! -s $INDEX_FILE || $INDEX_FILE -ot $CATALOG_FILE ]] ||
+    ! jq -e --argjson v "$INDEX_VERSION" '(.indexVersion // 0) == $v' "$INDEX_FILE" >/dev/null 2>&1; then
     build_index || fail "cached catalog is not usable; try: omarchy-plugin-store catalog --refresh"
   fi
 }
@@ -269,13 +293,16 @@ merged_entry() {
     --arg dir "$dir" \
     --arg head "$head" \
     --arg branch "$branch" \
-    --arg lname "$lname" '
+    --arg lname "$lname" "$JQ_INITIALS"'
     . as $e
     | ($e.upstreamValidatedCommit // "") as $uv
     | ($e.listingValidatedCommit // "") as $lv
     | (if $uv != "" then $uv elif $lv != "" then $lv else "" end) as $validated
     | $e
       + { name: (if ($e.name // "") != "" then $e.name else $lname end) }
+      + { hasPreview: ((($e.previewThumbnail // "") | tostring) != ""),
+          initials: (if (($e.initials // "") | tostring) != "" then ($e.initials | tostring)
+                     else derive_initials((if ($e.name // "") != "" then $e.name else $lname end) | tostring) end) }
       + { listed: $listed, installed: $installed, enabled: $enabled,
           localDir: $dir, localHead: $head,
           localBranch: $branch,
@@ -297,6 +324,7 @@ Read-only commands
   search [query] [filters]             search the catalog (default output: TSV)
   show <id> [--json]                   detail card for one plugin
   thumb <id> [--detail]                print path to the cached preview image
+  thumbs [--detail] [--json] <id>...   fetch many previews at once (id<TAB>path)
   installed [--json]                   list installed third-party plugins
   tui [query]                          interactive fzf browser
 
@@ -437,13 +465,15 @@ USAGE
     --argjson notInstalled "$not_installed" \
     --argjson installable "$installable" \
     --arg sort "$sort" \
-    --argjson limit "$limit" '
+    --argjson limit "$limit" "$JQ_INITIALS"'
     ($q | ascii_downcase) as $ql
     | ($category | ascii_downcase) as $cl
     | ($kind | ascii_downcase) as $kl
     | [ (.plugins + $extra)[]
         | . + { installed: ($local[.id] != null),
-                enabled: (($local[.id].enabled) // false) }
+                enabled: (($local[.id].enabled) // false),
+                hasPreview: (((.previewThumbnail // "") | tostring) != ""),
+                initials: initials_of }
         | select($ql == "" or (
             ([ .id, .name, .description, .author ] + (.tags // []))
             | map(ascii_downcase)
@@ -716,6 +746,146 @@ cmd_thumb() {
     mv -f "$tmp" "$out"
   fi
   echo "$out"
+}
+
+# thumbs downloads many previews at once so the overlay's grid can fill in a
+# screenful with one process instead of one per cell. The parent resolves every
+# asset URL with a single jq pass; the workers below only run curl.
+cmd_thumb_fetch() {
+  # hidden helper: one "id<TAB>url<TAB>outpath" line per invocation
+  local line="${1:-}"
+  local id url out
+  IFS=$'\t' read -r id url out <<<"$line"
+  [[ -n $id && -n $url && -n $out ]] || return 1
+
+  if [[ ! -s $out ]]; then
+    local tmp
+    tmp="$(mktemp "$THUMB_DIR/.dl.XXXXXX")" || return 1
+    if ! curl -fsSL --max-time 20 -o "$tmp" "$url" 2>/dev/null; then
+      rm -f "$tmp"
+      return 1
+    fi
+    if [[ ! -s $tmp ]]; then
+      rm -f "$tmp"
+      return 1
+    fi
+    mv -f "$tmp" "$out"
+  fi
+  printf '%s\t%s\n' "$id" "$out"
+}
+
+cmd_thumbs() {
+  local detail=0 format="tsv" refresh=0
+  local ids=()
+  while (($# > 0)); do
+    case "$1" in
+    --detail) detail=1; shift ;;
+    --json) format="json"; shift ;;
+    --tsv) format="tsv"; shift ;;
+    --refresh) refresh=1; shift ;;
+    -h | --help)
+      cat <<'USAGE'
+Usage: omarchy-plugin-store thumbs [--detail] [--tsv|--json] <id>...
+
+Downloads any missing previews for the given ids (8 at a time) and prints one
+"id<TAB>path" line per id that has one. Ids are read from stdin when none are
+given on the command line. Ids without a preview, and failed downloads, are
+skipped silently; a count goes to stderr.
+
+  --detail    fetch the 1600x900 detail image instead of the 720x405 card
+  --json      print {"id": "path", ...} instead of TSV
+USAGE
+      return 0
+      ;;
+    -*) fail "unknown thumbs option: $1" ;;
+    *)
+      ids+=("$1")
+      shift
+      ;;
+    esac
+  done
+
+  if ((${#ids[@]} == 0)) && [[ ! -t 0 ]]; then
+    local line
+    while IFS= read -r line; do
+      line="${line//[$'\t\r ']/}"
+      [[ -n $line ]] && ids+=("$line")
+    done
+  fi
+
+  # Drop duplicates, then ids that could not name a cache file safely. A
+  # rejected id still counts as requested, so a caller that asks only for
+  # garbage gets a non-zero exit rather than a silent success.
+  local wanted=() seen=" " requested=0 id
+  for id in "${ids[@]+"${ids[@]}"}"; do
+    [[ -n $id ]] || continue
+    [[ $seen == *" $id "* ]] && continue
+    seen+="$id "
+    requested=$((requested + 1))
+    valid_plugin_id "$id" || continue
+    wanted+=("$id")
+  done
+
+  if ((requested == 0)); then
+    [[ $format == json ]] && echo "{}"
+    return 0
+  fi
+
+  if ((${#wanted[@]} == 0)); then
+    [[ $format == json ]] && echo "{}"
+    warn "$requested of $requested previews unavailable"
+    return 1
+  fi
+
+  ensure_cache "$refresh"
+  mkdir -p "$THUMB_DIR"
+
+  local jobs
+  jobs="$(jq -r \
+    --arg base "$ASSET_BASE" \
+    --arg dir "$THUMB_DIR" \
+    --argjson detail "$detail" '
+    ([.plugins[] | {key: .id, value: .}] | from_entries) as $m
+    | $ARGS.positional[]
+    | . as $id
+    | ($m[$id] // empty)
+    | (if $detail == 1 then (.previewImage // "") else (.previewThumbnail // "") end) as $rel
+    | select($rel != "")
+    # The catalog is remote data: only plain relative asset paths are fetched.
+    | select(($rel | startswith("/")) | not)
+    | select(($rel | contains("..")) | not)
+    | select(($rel | contains("://")) | not)
+    | [$id, ($base + $rel), ($dir + "/" + $id + (if $detail == 1 then ".detail" else "" end) + ".webp")]
+    | @tsv
+  ' "$INDEX_FILE" --args "${wanted[@]}" 2>/dev/null || true)"
+
+  local found=0 line
+  local pairs=()
+  if [[ -n $jobs ]]; then
+    while IFS= read -r line; do
+      [[ -n $line ]] || continue
+      found=$((found + 1))
+      if [[ $format == json ]]; then
+        pairs+=("$line")
+      else
+        printf '%s\n' "$line"
+      fi
+    done < <(printf '%s\n' "$jobs" | xargs -r -I {} -P 8 "$SELF" __thumb-fetch {} 2>/dev/null || true)
+  fi
+
+  if [[ $format == json ]]; then
+    if ((found == 0)); then
+      echo "{}"
+    else
+      printf '%s\n' "${pairs[@]}" |
+        jq -R -s 'split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: .[1]}) | from_entries'
+    fi
+  fi
+
+  local missing=$((requested - found))
+  ((missing > 0)) && warn "$missing of $requested previews unavailable"
+  ((found > 0)) || return 1
+  return 0
 }
 
 installed_rows() {
@@ -1228,6 +1398,7 @@ main() {
   search) cmd_search "$@" ;;
   show) cmd_show "$@" ;;
   thumb) cmd_thumb "$@" ;;
+  thumbs) cmd_thumbs "$@" ;;
   installed) cmd_installed "$@" ;;
   install) cmd_install "$@" ;;
   pin) cmd_pin "$@" ;;
@@ -1238,6 +1409,7 @@ main() {
   update) cmd_update "$@" ;;
   tui) cmd_tui "$@" ;;
   __tui-list) cmd_tui_list "$@" ;;
+  __thumb-fetch) cmd_thumb_fetch "$@" ;;
   *) fail "unknown command: $cmd (try --help)" ;;
   esac
 }

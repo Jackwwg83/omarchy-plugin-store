@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "jackom.plugin-store",
+  "name": "Plugin Store",
+  "version": "0.2.0",
+  "author": "jackom",
+  "description": "Browse, install and manage marketplace shell plugins with previews",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "Store.qml" }
+}

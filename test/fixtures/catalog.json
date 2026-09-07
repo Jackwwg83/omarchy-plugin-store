@@ -55,6 +55,7 @@
     {
       "id": "lacuna.suite",
       "name": "Lacuna Suite",
+      "initials": "XY",
       "description": "A whole shell suite with its own installer.",
       "author": "Lacuna",
       "version": "1.4.0",
