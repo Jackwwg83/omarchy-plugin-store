@@ -526,19 +526,19 @@ assert_eq "install of an unknown plugin exits 1" 1 "$RC"
 # ----------------------------------------------------------- 9. self guard ---
 
 reset_log
-store remove jackom.plugin-store
+store remove io.github.jackwwg83.plugin-store
 assert_eq "remove of the store itself exits 1" 1 "$RC"
 assert_contains "remove of the store itself explains" "$ERR" "is the plugin store itself"
 assert_not_contains "remove of the store itself runs nothing" "$(log)" "omarchy-plugin-remove"
 
 reset_log
-store remove jackom.plugin-store --yes
+store remove io.github.jackwwg83.plugin-store --yes
 assert_eq "remove of the store itself with --yes proceeds" 0 "$RC"
 assert_contains "remove of the store itself with --yes calls through" "$(log)" \
-  "omarchy-plugin-remove jackom.plugin-store --yes"
+  "omarchy-plugin-remove io.github.jackwwg83.plugin-store --yes"
 
 reset_log
-store disable jackom.plugin-store
+store disable io.github.jackwwg83.plugin-store
 assert_eq "disable of the store itself exits 1" 1 "$RC"
 
 reset_log

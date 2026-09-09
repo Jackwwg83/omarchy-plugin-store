@@ -103,7 +103,7 @@ Install step (do it, and document it): `ln -sf "$PWD/bin/omarchy-plugin-store" ~
 - Cache dir: `$XDG_CACHE_HOME/omarchy-plugin-store/` containing
   `catalog.json` (raw), `index.json` (slimmed, see §4.1), `thumbs/<id>.webp`, `thumbs/<id>.detail.webp`.
 - Never edit `~/.config/omarchy/shell.json` directly — always go through `omarchy-plugin-*`.
-- `SELF_ID="jackom.plugin-store"` constant. `remove`/`disable` on SELF_ID print a
+- `SELF_ID="io.github.jackwwg83.plugin-store"` constant. `remove`/`disable` on SELF_ID print a
   warning ("this is the plugin store itself") and require `--yes`.
 - All jq programs must tolerate null/missing fields (`// ""`, `// 0`, `// []`).
 - Output to stdout is data; everything else (progress, warnings) goes to stderr.
@@ -284,7 +284,7 @@ Must run fully offline and never touch `~/.config` or `~/.cache`:
   6. `show <installed-id>` reports `pinned` correctly before/after `pin`/`unpin`; `show <unknown>` exits 1; `show <unlisted-but-installed>` exits 0 with the unlisted note.
   7. `thumb` downloads (copies) the webp into cache and prints the path; second call doesn't re-download; no-preview id exits 1 with empty stdout.
   8. `install` non-interactive without `--yes` fails; with `--yes` the shim log shows `omarchy-plugin-add <url>.git --yes` followed by `omarchy-plugin-enable <id> --section right` when `--section right`; `--no-enable` omits enable; `--pin` leaves HEAD at validatedCommit; `installAvailable:false` id fails mentioning the note.
-  9. `remove jackom.plugin-store` without `--yes` fails with the self-guard message.
+  9. `remove io.github.jackwwg83.plugin-store` without `--yes` fails with the self-guard message.
   10. `installed` tsv shows `enabled|disabled`, `listed|unlisted`, and `pinned|differs|unknown` correctly.
 - Also run `bash -n bin/omarchy-plugin-store` as the first test.
 

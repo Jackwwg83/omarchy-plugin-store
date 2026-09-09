@@ -11,7 +11,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes}"
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-SELF_ID="jackom.plugin-store"
+SELF_ID="io.github.jackwwg83.plugin-store"
 
 CATALOG_URL="${OMARCHY_PLUGIN_STORE_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
 ASSET_BASE="${OMARCHY_PLUGIN_STORE_ASSET_BASE:-https://plugins.omarchy.org/}"

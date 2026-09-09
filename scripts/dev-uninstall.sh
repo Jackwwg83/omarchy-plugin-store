@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ID="jackom.plugin-store"
+ID="io.github.jackwwg83.plugin-store"
 DEST="${OMARCHY_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}/$ID"
 
 omarchy-shell shell hide "$ID" >/dev/null 2>&1 || true

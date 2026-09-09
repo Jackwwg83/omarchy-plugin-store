@@ -101,14 +101,14 @@ so keep the id→path map on root, not in the delegate.
 
 - Plugins live at `~/.config/omarchy/plugins/<id>/`. Saving any file there
   hot-reloads plugin code; force with `omarchy-shell shell rescanPlugins`.
-- Summon from a terminal: `omarchy-shell shell toggle jackom.plugin-store`
+- Summon from a terminal: `omarchy-shell shell toggle io.github.jackwwg83.plugin-store`
   (also `summon` / `hide`). This is what a keybinding would call
-  (`o.bind("SUPER + SHIFT + P", "Plugin store", "omarchy-shell shell toggle jackom.plugin-store")`
+  (`o.bind("SUPER + SHIFT + P", "Plugin store", "omarchy-shell shell toggle io.github.jackwwg83.plugin-store")`
   in `~/.config/hypr/bindings.lua`) — document it in README, do NOT edit the
   user's bindings.lua.
 - Shell log: `journalctl --user -n 200 --no-pager _COMM=quickshell` or
   `journalctl --user -n 200 --no-pager | grep -i "plugin-store\|plugin store\|qml"`;
-  a QML load error appears as `panel plugin jackom.plugin-store failed to load: …`.
+  a QML load error appears as `panel plugin io.github.jackwwg83.plugin-store failed to load: …`.
   If neither shows anything, `quickshell --help` / `omarchy-shell --help` for a
   log subcommand.
 - Screenshot for self-verification: `grim -o eDP-1 /tmp/claude-1000/…/shot.png`
@@ -123,7 +123,7 @@ so keep the id→path map on root, not in the delegate.
 manifest.json                 plugin manifest (§2)
 Store.qml                     the overlay (§3) — may split helpers into Store/*.qml or *.js in the repo root or a subdir
 scripts/dev-install.sh        rsync the working tree (excluding .git, test, scripts, *.md) into
-                              ~/.config/omarchy/plugins/jackom.plugin-store/ then `omarchy-shell shell rescanPlugins`
+                              ~/.config/omarchy/plugins/io.github.jackwwg83.plugin-store/ then `omarchy-shell shell rescanPlugins`
 scripts/dev-uninstall.sh      remove that dir + rescan
 bin/omarchy-plugin-store      Phase 2 additions to the CLI (§4) with tests in test/run.sh
 README.md                     new "Overlay" section: install (`omarchy plugin add <repo> --enable`), keybinding line, keys, dev loop
@@ -134,10 +134,10 @@ README.md                     new "Overlay" section: install (`omarchy plugin ad
 ```json
 {
   "schemaVersion": 1,
-  "id": "jackom.plugin-store",
+  "id": "io.github.jackwwg83.plugin-store",
   "name": "Plugin Store",
   "version": "0.2.0",
-  "author": "jackom",
+  "author": "Jackwwg83",
   "description": "Browse, install and manage marketplace shell plugins with previews",
   "kinds": ["overlay"],
   "keepLoaded": true,
@@ -216,7 +216,7 @@ non-interactive. Therefore the overlay itself owns the consent step:
 
 Remove asks "Remove <id> from ~/.config/omarchy/plugins?". Enable/Disable/Pin/
 Unpin/Update don't need confirmation. The store refuses to Remove/Disable itself
-(`jackom.plugin-store`) — grey the buttons out with a tooltip; the CLI guard is
+(`io.github.jackwwg83.plugin-store`) — grey the buttons out with a tooltip; the CLI guard is
 the backstop, not the UI.
 
 Commands (argv arrays, no shell string interpolation):
@@ -274,12 +274,12 @@ thumbnail-less plugin already) and 4.2.
 ```
 bash test/run.sh                                        # all PASS incl. new thumbs/hasPreview cases
 omarchy plugin validate ~/Projects/omarchy/omarchy-plugin-store   # exit 0
-scripts/dev-install.sh                                  # installs to ~/.config/omarchy/plugins/jackom.plugin-store/
-omarchy plugin list | grep jackom.plugin-store          # enabled, third-party, overlay
-omarchy-shell shell toggle jackom.plugin-store          # overlay appears; grim screenshot reviewed
+scripts/dev-install.sh                                  # installs to ~/.config/omarchy/plugins/io.github.jackwwg83.plugin-store/
+omarchy plugin list | grep io.github.jackwwg83.plugin-store          # enabled, third-party, overlay
+omarchy-shell shell toggle io.github.jackwwg83.plugin-store          # overlay appears; grim screenshot reviewed
   - grid shows thumbnails within ~2 s for the first screen; placeholders for no-preview entries
   - typing filters instantly; esc clears; esc again closes; click-outside closes
-  - Installed tab lists jackom.clash (unlisted) and jackom.plugin-store itself with Remove greyed out
+  - Installed tab lists jackom.clash (unlisted) and io.github.jackwwg83.plugin-store itself with Remove greyed out
   - selecting a listed plugin shows detail image + metadata; Install button opens ConfirmDialog; Cancel works
 journalctl --user -n 100 --no-pager | grep -iE "plugin-store|qml|warn"   # no QML warnings from Store.qml
 ```

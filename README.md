@@ -111,7 +111,7 @@ a desktop notification.
 process.** Read the repo before you install it. Non-interactive installs refuse
 to run without `--yes`.
 
-`remove` and `disable` on `jackom.plugin-store` — the store itself — require
+`remove` and `disable` on `io.github.jackwwg83.plugin-store` — the store itself — require
 `--yes`.
 
 ### TUI keys
@@ -128,7 +128,7 @@ The preview pane on the right is `omarchy-plugin-store show <id>`.
 
 ## Overlay
 
-The repo is also an Omarchy shell plugin (`jackom.plugin-store`, kind
+The repo is also an Omarchy shell plugin (`io.github.jackwwg83.plugin-store`, kind
 `overlay`): a centered card with a thumbnail grid of the whole marketplace on
 the left and a detail pane with context-aware actions on the right. It shells
 out to `bin/omarchy-plugin-store` for everything, so what you see is exactly
@@ -143,15 +143,15 @@ omarchy plugin add https://github.com/Jackwwg83/omarchy-plugin-store.git --enabl
 Then bind a key by adding this line to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + SHIFT + P", "Plugin store", "omarchy-shell shell toggle jackom.plugin-store")
+o.bind("SUPER + SHIFT + CTRL + P", "Plugin store", "omarchy-shell shell toggle io.github.jackwwg83.plugin-store")
 ```
 
 Or summon it straight from a terminal:
 
 ```bash
-omarchy-shell shell toggle jackom.plugin-store        # also: summon / hide
-omarchy-shell shell summon jackom.plugin-store '{"tab":"installed"}'
-omarchy-shell shell summon jackom.plugin-store '{"query":"clock"}'
+omarchy-shell shell toggle io.github.jackwwg83.plugin-store        # also: summon / hide
+omarchy-shell shell summon io.github.jackwwg83.plugin-store '{"tab":"installed"}'
+omarchy-shell shell summon io.github.jackwwg83.plugin-store '{"query":"clock"}'
 ```
 
 The payload is optional JSON; `tab` (`browse` | `installed`) and `query` are
@@ -188,8 +188,8 @@ tooltip, and the CLI guard is the backstop.
 ### Dev loop
 
 ```bash
-scripts/dev-install.sh          # rsync the tree into ~/.config/omarchy/plugins/jackom.plugin-store/ + rescan
-omarchy-shell shell toggle jackom.plugin-store
+scripts/dev-install.sh          # rsync the tree into ~/.config/omarchy/plugins/io.github.jackwwg83.plugin-store/ + rescan
+omarchy-shell shell toggle io.github.jackwwg83.plugin-store
 scripts/dev-uninstall.sh        # disable, delete, rescan
 ```
 

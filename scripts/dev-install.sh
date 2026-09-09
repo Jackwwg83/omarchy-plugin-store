@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copy the working tree into ~/.config/omarchy/plugins/jackom.plugin-store/ and
+# Copy the working tree into ~/.config/omarchy/plugins/io.github.jackwwg83.plugin-store/ and
 # make the running shell pick it up. This is the development loop: the shell
 # only loads plugins from that directory, and it hot-reloads whatever lands
 # there. `omarchy plugin add <repo> --enable` is what users run instead.
@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-ID="jackom.plugin-store"
+ID="io.github.jackwwg83.plugin-store"
 DEST="${OMARCHY_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}/$ID"
 
 command -v rsync >/dev/null 2>&1 || {

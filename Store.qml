@@ -18,7 +18,7 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string selfId: (manifest && manifest.id) ? String(manifest.id) : "jackom.plugin-store"
+  readonly property string selfId: (manifest && manifest.id) ? String(manifest.id) : "io.github.jackwwg83.plugin-store"
   readonly property string sourceDir: (manifest && manifest.__sourceDir) ? String(manifest.__sourceDir) : ""
   readonly property string cli: sourceDir !== "" ? sourceDir + "/bin/omarchy-plugin-store" : "omarchy-plugin-store"
 

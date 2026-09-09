@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "jackom.plugin-store",
+  "id": "io.github.jackwwg83.plugin-store",
   "name": "Plugin Store",
   "version": "0.2.0",
-  "author": "jackom",
+  "author": "Jackwwg83",
   "description": "Browse, install and manage marketplace shell plugins with previews",
   "kinds": ["overlay"],
   "keepLoaded": true,
